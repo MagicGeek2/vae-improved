@@ -14,8 +14,8 @@ from PIL import Image
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.utilities.distributed import rank_zero_only
-from pytorch_lightning.utilities import rank_zero_info
+# from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities import rank_zero_only, rank_zero_info
 
 from vae.data.base import Txt2ImgIterableBaseDataset
 from vae.util import instantiate_from_config
@@ -254,7 +254,8 @@ class SetupCallback(Callback):
             ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
             trainer.save_checkpoint(ckpt_path)
 
-    def on_pretrain_routine_start(self, trainer, pl_module):
+    def on_fit_start(self, trainer, pl_module):
+    # def on_pretrain_routine_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
             # Create logdirs and save configs
             os.makedirs(self.logdir, exist_ok=True)
@@ -295,7 +296,7 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            # pl.loggers.TestTubeLogger: self._testtube,
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
@@ -380,11 +381,13 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    # def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args, **kwargs):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    # def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args, **kwargs):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
@@ -396,13 +399,14 @@ class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
-        torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
-        torch.cuda.synchronize(trainer.root_gpu)
+        torch.cuda.reset_peak_memory_stats(trainer.strategy.root_device.index)
+        torch.cuda.synchronize(trainer.strategy.root_device.index)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module, outputs):
-        torch.cuda.synchronize(trainer.root_gpu)
-        max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+    # def on_train_epoch_end(self, trainer, pl_module, outputs):
+    def on_train_epoch_end(self, trainer, pl_module):
+        torch.cuda.synchronize(trainer.strategy.root_device.index)
+        max_memory = torch.cuda.max_memory_allocated(trainer.strategy.root_device.index) / 2 ** 20
         epoch_time = time.time() - self.start_time
 
         try:
@@ -517,15 +521,17 @@ if __name__ == "__main__":
         lightning_config = config.pop("lightning", OmegaConf.create())
         # merge trainer cli with config
         trainer_config = lightning_config.get("trainer", OmegaConf.create())
-        # default to ddp
-        trainer_config["accelerator"] = "ddp"
+        # ! no gpus config 
+        trainer_config["accelerator"] = "gpu"
+        trainer_config["strategy"] = "ddp"
+        
         for k in nondefault_trainer_args(opt):
             trainer_config[k] = getattr(opt, k)
-        if not "gpus" in trainer_config:
+        if not "devices" in trainer_config:
             del trainer_config["accelerator"]
             cpu = True
         else:
-            gpuinfo = trainer_config["gpus"]
+            gpuinfo = trainer_config["devices"]
             print(f"Running on GPUs {gpuinfo}")
             cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
@@ -555,12 +561,16 @@ if __name__ == "__main__":
                     "save_dir": logdir,
                 }
             },
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
+                "params": {
+                    "save_dir": logdir,
+                    "name": nowname,
+                }
+            },
         }
-        default_logger_cfg = default_logger_cfgs["testtube"]
-        if "logger" in lightning_config:
-            logger_cfg = lightning_config.logger
-        else:
-            logger_cfg = OmegaConf.create()
+        default_logger_cfg = default_logger_cfgs["tensorboard"]
+        logger_cfg = lightning_config.get('logger', OmegaConf.create())
         logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
         trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
 
@@ -579,11 +589,8 @@ if __name__ == "__main__":
             print(f"Monitoring {model.monitor} as checkpoint metric.")
             default_modelckpt_cfg["params"]["monitor"] = model.monitor
             default_modelckpt_cfg["params"]["save_top_k"] = 3
-
-        if "modelcheckpoint" in lightning_config:
-            modelckpt_cfg = lightning_config.modelcheckpoint
-        else:
-            modelckpt_cfg =  OmegaConf.create()
+            
+        modelckpt_cfg = lightning_config.get('modelcheckpoint', OmegaConf.create())
         modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
         print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
         if version.parse(pl.__version__) < version.parse('1.4.0'):
@@ -625,11 +632,8 @@ if __name__ == "__main__":
         if version.parse(pl.__version__) >= version.parse('1.4.0'):
             default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
 
-        if "callbacks" in lightning_config:
-            callbacks_cfg = lightning_config.callbacks
-        else:
-            callbacks_cfg = OmegaConf.create()
-
+        callbacks_cfg = lightning_config.get('callbacks', OmegaConf.create())
+        
         if 'metrics_over_trainsteps_checkpoint' in callbacks_cfg:
             print(
                 'Caution: Saving checkpoints every n train steps without deleting. This might require some free space.')
@@ -673,7 +677,7 @@ if __name__ == "__main__":
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
         if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+            ngpu = len(lightning_config.trainer.devices.strip(",").split(','))
         else:
             ngpu = 1
         if 'accumulate_grad_batches' in lightning_config.trainer:
@@ -685,7 +689,7 @@ if __name__ == "__main__":
         if opt.scale_lr:
             model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
             print(
-                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
+                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_devices) * {} (batchsize) * {:.2e} (base_lr)".format(
                     model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
         else:
             model.learning_rate = base_lr

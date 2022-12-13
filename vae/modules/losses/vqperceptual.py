@@ -47,7 +47,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
                  disc_num_layers=3, disc_in_channels=3, disc_factor=1.0, disc_weight=1.0,
                  perceptual_weight=1.0, use_actnorm=False, disc_conditional=False,
                  disc_ndf=64, disc_loss="hinge", n_classes=None, perceptual_loss="lpips",
-                 pixel_loss="l1"):
+                 pixel_loss="l1", 
+                 clip_weight=1.0):
         super().__init__()
         assert disc_loss in ["hinge", "vanilla"]
         assert perceptual_loss in ["lpips", "clips", "dists"]
@@ -83,6 +84,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         self.discriminator_weight = disc_weight
         self.disc_conditional = disc_conditional
         self.n_classes = n_classes
+        
+        self.clip_weight = clip_weight
 
     def calculate_adaptive_weight(self, nll_loss, g_loss, last_layer=None):
         if last_layer is not None:
@@ -98,18 +101,18 @@ class VQLPIPSWithDiscriminator(nn.Module):
         return d_weight
 
     def forward(self, codebook_loss, inputs, reconstructions, optimizer_idx,
-                global_step, last_layer=None, cond=None, split="train", predicted_indices=None):
+                global_step, last_layer=None, cond=None, split="train", predicted_indices=None, clip_feat=None, clip_target=None):
         if not exists(codebook_loss):
             codebook_loss = torch.tensor([0.]).to(inputs.device)
         #rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
         rec_loss = self.pixel_loss(inputs.contiguous(), reconstructions.contiguous())
         if self.perceptual_weight > 0:
             p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())
-            rec_loss = rec_loss + self.perceptual_weight * p_loss
+            # rec_loss = rec_loss + self.perceptual_weight * p_loss
         else:
-            p_loss = torch.tensor([0.0])
+            p_loss = torch.tensor([0.]).to(inputs.device)
 
-        nll_loss = rec_loss
+        nll_loss = self.pixel_weight * rec_loss + self.perceptual_weight * p_loss
         #nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
         nll_loss = torch.mean(nll_loss)
 
@@ -132,6 +135,10 @@ class VQLPIPSWithDiscriminator(nn.Module):
 
             disc_factor = adopt_weight(self.disc_factor, global_step, threshold=self.discriminator_iter_start)
             loss = nll_loss + d_weight * disc_factor * g_loss + self.codebook_weight * codebook_loss.mean()
+            
+            if clip_feat is not None:
+                clip_loss =  torch.mean((clip_target.contiguous() - clip_feat.contiguous())**2)
+                loss += self.clip_weight * clip_loss
 
             log = {"{}/total_loss".format(split): loss.clone().detach().mean(),
                    "{}/quant_loss".format(split): codebook_loss.detach().mean(),
@@ -147,7 +154,11 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 with torch.no_grad():
                     perplexity, cluster_usage = measure_perplexity(predicted_indices, self.n_classes)
                 log[f"{split}/perplexity"] = perplexity
-                log[f"{split}/cluster_usage"] = cluster_usage
+                log[f"{split}/cluster_usage"] = cluster_usage.to(dtype=torch.float32)
+                
+            if clip_feat is not None:
+                log[f"{split}/clip_loss"] = clip_loss.detach().mean() 
+                
             return loss, log
 
         if optimizer_idx == 1:
