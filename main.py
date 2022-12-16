@@ -1,3 +1,5 @@
+# ! don't use 'gpus' anymore ; set 'accelerator' and 'strategy' in shell or yaml, and use 'devices' to specify gpus to use
+
 import argparse, os, sys, datetime, glob, importlib, csv
 import numpy as np
 import time
@@ -521,9 +523,9 @@ if __name__ == "__main__":
         lightning_config = config.pop("lightning", OmegaConf.create())
         # merge trainer cli with config
         trainer_config = lightning_config.get("trainer", OmegaConf.create())
-        # ! no gpus config 
+        # ! don't use 'gpus' anymore ; set 'accelerator' in shell or yaml, and use 'devices' to specify gpus to use
         trainer_config["accelerator"] = "gpu"
-        trainer_config["strategy"] = "ddp"
+        # trainer_config["strategy"] = "ddp"
         
         for k in nondefault_trainer_args(opt):
             trainer_config[k] = getattr(opt, k)
@@ -533,6 +535,7 @@ if __name__ == "__main__":
         else:
             gpuinfo = trainer_config["devices"]
             print(f"Running on GPUs {gpuinfo}")
+            trainer_config["devices"] = [int(device_num) for device_num in gpuinfo.strip(',').split(',')]
             cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
@@ -677,7 +680,8 @@ if __name__ == "__main__":
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
         if not cpu:
-            ngpu = len(lightning_config.trainer.devices.strip(",").split(','))
+            ngpu = len(lightning_config.trainer.devices)
+            # ngpu = len(lightning_config.trainer.devices.strip(",").split(','))
         else:
             ngpu = 1
         if 'accumulate_grad_batches' in lightning_config.trainer:

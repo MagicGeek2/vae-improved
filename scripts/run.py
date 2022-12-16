@@ -17,9 +17,9 @@ sleep_and_tell(delay_seconds)
 
 
 # * train
-devices = '0,'
+devices = '0'
 cfg_path = 'configs/config.yaml'
-name='coco2014_res128_vq_d4_n1024_noattn_nodisc_clip'
+name='coco2014_res128_vq_d4_n1024_noattn_clip'
 # name='test_exp'
 logdir='logs/test'
 scale_lr='no'

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from contextlib import contextmanager
 from torch.optim.lr_scheduler import LambdaLR
 import numpy as np
-import version
+from packaging import version
 from argparse import Namespace
 
 
@@ -239,8 +239,8 @@ class VQModel(pl.LightningModule):
                  prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=len(x))
         self.log(f"val{suffix}/aeloss", aeloss,
                  prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=len(x))
-        # if version.parse(pl.__version__) >= version.parse('1.4.0'):
-        del log_dict_ae[f"val{suffix}/nll_loss"]
+        if version.parse(pl.__version__) >= version.parse('1.4.0'):
+            del log_dict_ae[f"val{suffix}/nll_loss"]
 
         self.log_dict(log_dict_ae, batch_size=len(x))
         self.log_dict(log_dict_disc, batch_size=len(x))

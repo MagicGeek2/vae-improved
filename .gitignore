@@ -1,8 +1,14 @@
 data/
 logs/
 tmp/
+checkpoints/
+# ckpt
 *.pth
 *.pt
+# images
+*.png
+*.jpg
+*.jpeg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
