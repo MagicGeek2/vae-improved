@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from functools import partial
 from PIL import Image
+import math
 
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
@@ -75,7 +76,7 @@ def get_parser(**parser_kwargs):
         "--no-test",
         type=str2bool,
         const=True,
-        default=False,
+        default=True,
         nargs="?",
         help="disable test",
     )
@@ -292,7 +293,7 @@ class SetupCallback(Callback):
 class ImageLogger(Callback):
     def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True,
                  rescale=True, disabled=False, log_on_batch_idx=False, log_first_step=False,
-                 log_images_kwargs=None):
+                 log_images_kwargs=None, align_rec=True):
         super().__init__()
         self.rescale = rescale
         self.batch_freq = batch_frequency
@@ -308,6 +309,7 @@ class ImageLogger(Callback):
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
+        self.align_rec = align_rec
 
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
@@ -324,8 +326,13 @@ class ImageLogger(Callback):
     def log_local(self, save_dir, split, images,
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
+        bs=images['inputs'].shape[0]
+        if self.align_rec:
+            # assert images['inputs'] and images['reconstructions']
+            images['input_rec'] = torch.cat((images['inputs'], images['reconstructions']), dim=0)
         for k in images:
-            grid = torchvision.utils.make_grid(images[k], nrow=4)
+            nrow = bs if k=='input_rec' else bs // int(math.sqrt(bs))
+            grid = torchvision.utils.make_grid(images[k], nrow=nrow)
             if self.rescale:
                 grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
@@ -339,6 +346,8 @@ class ImageLogger(Callback):
             path = os.path.join(root, filename)
             os.makedirs(os.path.split(path)[0], exist_ok=True)
             Image.fromarray(grid).save(path)
+            
+        
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
@@ -378,7 +387,7 @@ class ImageLogger(Callback):
             try:
                 self.log_steps.pop(0)
             except IndexError as e:
-                print(e)
+                # print(e)
                 pass
             return True
         return False
@@ -511,6 +520,7 @@ if __name__ == "__main__":
         nowname = now + name + opt.postfix
         logdir = os.path.join(opt.logdir, nowname)
 
+    os.makedirs(logdir, exist_ok=True)
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
     seed_everything(opt.seed)
@@ -568,7 +578,7 @@ if __name__ == "__main__":
                 "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
                     "save_dir": logdir,
-                    "name": nowname,
+                    "name": 'tensorboard',
                 }
             },
         }

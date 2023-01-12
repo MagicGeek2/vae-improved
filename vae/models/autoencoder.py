@@ -28,8 +28,6 @@ class VQModel(pl.LightningModule):
                  ckpt_path=None,
                  ignore_keys=[],
                  image_key="image",
-                 clip_feat_key="clip_feat",
-                 clip_cfg=None,
                  colorize_nlabels=None,
                  monitor=None,
                  batch_resize_range=None,
@@ -48,17 +46,6 @@ class VQModel(pl.LightningModule):
         self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(
             embed_dim, ddconfig["z_channels"], 1)
-
-        self.clip_aware = False
-        if clip_cfg is not None:
-            self.clip_avgpool = torch.nn.AvgPool2d(
-                clip_cfg.in_res // clip_cfg.f_res)  # ex. 32 and 8
-            self.clip_attnpool = AttentionPool2d(
-                clip_cfg.f_res, ddconfig["z_channels"], clip_cfg.heads, clip_cfg.clip_feature_dim)
-            self.clip_feat_key = clip_feat_key
-            self.clip_aware = True
-        else:
-            self.clip_feat_key = None
 
         if colorize_nlabels is not None:
             assert type(colorize_nlabels) == int
@@ -79,6 +66,15 @@ class VQModel(pl.LightningModule):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
         self.optim_config = optim_config
+
+        self.vae_params = \
+            list(self.encoder.parameters()) + \
+            list(self.decoder.parameters()) + \
+            list(self.quantize.parameters()) + \
+            list(self.quant_conv.parameters()) + \
+            list(self.post_quant_conv.parameters())
+            
+        self.disc_params = self.loss.discriminator.parameters()
 
     @contextmanager
     def ema_scope(self, context=None):
@@ -117,14 +113,14 @@ class VQModel(pl.LightningModule):
     def encode(self, x):
         h = self.encoder(x)
 
-        clip_feat = None
-        if self.clip_aware:
-            clip_feat = self.clip_attnpool(self.clip_avgpool(h))
+        # clip_feat = None
+        # if self.clip_aware:
+        #     clip_feat = self.clip_attnpool(self.clip_avgpool(h))
 
         h = self.quant_conv(h)
         quant, emb_loss, info = self.quantize(h)
 
-        return quant, emb_loss, info, clip_feat
+        return quant, emb_loss, info
 
     def encode_to_prequant(self, x):
         h = self.encoder(x)
@@ -144,16 +140,12 @@ class VQModel(pl.LightningModule):
         return dec
 
     def forward(self, input, return_pred_indices=False):
-        """return dec, diff, optional(ind), clip_feat
-        """
-        quant, diff, (_, _, ind), clip_feat = self.encode(input)
+        quant, diff, (_, _, ind) = self.encode(input)
         dec = self.decode(quant)
 
-        re = [dec, diff]
         if return_pred_indices:
-            re.append(ind)
-        re.append(clip_feat)
-        return re
+            return dec, diff, ind
+        return dec, diff
 
     def reconstruct(self, x):
         h = self.encode_to_prequant(x)
@@ -161,7 +153,7 @@ class VQModel(pl.LightningModule):
         dec = self.decode(quant)
         return dec
 
-    def get_input(self, batch, k, k_clip=None):
+    def get_input(self, batch, k):
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
@@ -179,22 +171,19 @@ class VQModel(pl.LightningModule):
             if new_resize != x.shape[2]:
                 x = F.interpolate(x, size=new_resize, mode="bicubic")
             x = x.detach()
-
-        clip_target = None if k_clip is None else batch[k_clip].float()
-        return x, clip_target
+        return x
 
     def training_step(self, batch, batch_idx, optimizer_idx):
         # https://github.com/pytorch/pytorch/issues/37142
         # try not to fool the heuristics
-        x, clip_target = self.get_input(
-            batch, self.image_key, self.clip_feat_key)
-        xrec, qloss, ind, clip_feat = self.forward(x, return_pred_indices=True)
+        x = self.get_input(batch, self.image_key)
+        xrec, qloss, ind = self(x, return_pred_indices=True)
 
         if optimizer_idx == 0:
             # autoencode
             aeloss, log_dict_ae = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
                                             last_layer=self.get_last_layer(), split="train",
-                                            predicted_indices=ind, clip_feat=clip_feat, clip_target=clip_target)
+                                            predicted_indices=ind)
 
             self.log_dict(log_dict_ae, prog_bar=False, logger=True,
                           on_step=True, on_epoch=True, batch_size=len(x))
@@ -216,16 +205,14 @@ class VQModel(pl.LightningModule):
         return log_dict
 
     def _validation_step(self, batch, batch_idx, suffix=""):
-        x, clip_target = self.get_input(
-            batch, self.image_key, self.clip_feat_key)
-        xrec, qloss, ind, clip_feat = self.forward(x, return_pred_indices=True)
+        x = self.get_input(batch, self.image_key)
+        xrec, qloss, ind = self.forward(x, return_pred_indices=True)
 
         aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0,
                                         self.global_step,
                                         last_layer=self.get_last_layer(),
                                         split="val"+suffix,
-                                        predicted_indices=ind, clip_feat=clip_feat, clip_target=clip_target
-                                        )
+                                        predicted_indices=ind)
 
         discloss, log_dict_disc = self.loss(qloss, x, xrec, 1,
                                             self.global_step,
@@ -260,14 +247,9 @@ class VQModel(pl.LightningModule):
         print("lr_d", lr_d)
         print("lr_g", lr_g)
 
-        ae_params = list(self.encoder.parameters())+list(self.decoder.parameters())+list(
-            self.quantize.parameters())+list(self.quant_conv.parameters())+list(self.post_quant_conv.parameters())
-        if self.clip_aware:
-            ae_params.extend(list(self.clip_attnpool.parameters()))
-
-        opt_ae = torch.optim.Adam(ae_params,
+        opt_ae = torch.optim.Adam(self.vae_params,
                                   lr=lr_g, betas=(0.5, 0.9))
-        opt_disc = torch.optim.Adam(self.loss.discriminator.parameters(),
+        opt_disc = torch.optim.Adam(self.disc_params,
                                     lr=lr_d, betas=(0.5, 0.9))
 
         if scheduler_config is not None:
@@ -294,12 +276,12 @@ class VQModel(pl.LightningModule):
 
     def log_images(self, batch, only_inputs=False, plot_ema=False, **kwargs):
         log = dict()
-        x, _ = self.get_input(batch, self.image_key)
+        x = self.get_input(batch, self.image_key)
         x = x.to(self.device)
         if only_inputs:
             log["inputs"] = x
             return log
-        xrec, _, _ = self.forward(x)
+        xrec, qloss, *_= self(x)
         if x.shape[1] > 3:
             # colorize with random projection
             assert xrec.shape[1] > 3
@@ -309,7 +291,7 @@ class VQModel(pl.LightningModule):
         log["reconstructions"] = xrec
         if plot_ema:
             with self.ema_scope():
-                xrec_ema, _, _ = self.forward(x)
+                xrec_ema, qloss_ema = self.forward(x)
                 if x.shape[1] > 3:
                     xrec_ema = self.to_rgb(xrec_ema)
                 log["reconstructions_ema"] = xrec_ema
@@ -323,6 +305,118 @@ class VQModel(pl.LightningModule):
         x = F.conv2d(x, weight=self.colorize)
         x = 2.*(x-x.min())/(x.max()-x.min()) - 1.
         return x
+
+
+class VQModelWithCLIP(VQModel):
+
+    def __init__(self, clip_feat_key="clip_feat", clip_cfg=None, **kwargs):
+        super().__init__(**kwargs)
+        self.clip_aware = False
+        self.clip_feat_key = clip_feat_key
+        if clip_cfg is not None:
+            self.clip_avgpool = torch.nn.AvgPool2d(
+                clip_cfg.in_res // clip_cfg.f_res)  # ex. 32 and 8
+            self.clip_attnpool = AttentionPool2d(
+                clip_cfg.f_res, clip_cfg.in_dim, clip_cfg.heads, clip_cfg.clip_feature_dim)
+            self.clip_pre_vq = clip_cfg.clip_pre_vq  # 控制抽取 clip 特征的位置
+            self.clip_aware = True
+        if self.clip_aware:
+            self.vae_params.extend(self.clip_attnpool.parameters())
+
+    def forward(self, input):
+        z = self.encoder(input)
+        pre_quant = self.quant_conv(z)
+        quant, emb_loss, info = self.quantize(pre_quant)
+        post_quant = self.post_quant_conv(quant)
+        dec = self.decoder(post_quant)
+
+        if self.clip_aware:
+            clip_feat = self.clip_attnpool(self.clip_avgpool(
+                z if self.clip_pre_vq else post_quant))
+        else:
+            clip_feat = None
+        info = info + (clip_feat,)
+        return dec, emb_loss, info
+
+    def get_input(self, batch, k):
+        x = batch[k]
+        if k in ['image']:
+            if len(x.shape) == 3:
+                x = x[..., None]
+            x = x.permute(0, 3, 1, 2).to(
+                memory_format=torch.contiguous_format).float()
+            if self.batch_resize_range is not None:
+                lower_size = self.batch_resize_range[0]
+                upper_size = self.batch_resize_range[1]
+                if self.global_step <= 4:
+                    # do the first few batches with max size to avoid later oom
+                    new_resize = upper_size
+                else:
+                    new_resize = np.random.choice(
+                        np.arange(lower_size, upper_size+16, 16))
+                if new_resize != x.shape[2]:
+                    x = F.interpolate(x, size=new_resize, mode="bicubic")
+                x = x.detach()
+        elif k == 'clip_feat':
+            x = batch.get(k, None)
+
+        return x
+
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        # https://github.com/pytorch/pytorch/issues/37142
+        # try not to fool the heuristics
+        x = self.get_input(batch, self.image_key)
+        clip_target = self.get_input(batch, self.clip_feat_key)
+        xrec, qloss, (_, _, inds, clip_feat) = self(x)
+
+        if optimizer_idx == 0:
+            # autoencode
+            aeloss, log_dict_ae = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
+                                            last_layer=self.get_last_layer(), split="train",
+                                            predicted_indices=inds, clip_feat=clip_feat, clip_target=clip_target)
+
+            self.log_dict(log_dict_ae, prog_bar=False, logger=True,
+                          on_step=True, on_epoch=True, batch_size=len(x))
+            return aeloss
+
+        if optimizer_idx == 1:
+            # discriminator
+            discloss, log_dict_disc = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
+                                                last_layer=self.get_last_layer(), split="train")
+            self.log_dict(log_dict_disc, prog_bar=False, logger=True,
+                          on_step=True, on_epoch=True, batch_size=len(x))
+            return discloss
+
+    def _validation_step(self, batch, batch_idx, suffix=""):
+        x = self.get_input(batch, self.image_key)
+        clip_target = self.get_input(batch, self.clip_feat_key)
+        xrec, qloss, (_, _, inds, clip_feat) = self(x)
+
+        aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0,
+                                        self.global_step,
+                                        last_layer=self.get_last_layer(),
+                                        split="val"+suffix,
+                                        predicted_indices=inds, clip_feat=clip_feat, clip_target=clip_target
+                                        )
+
+        discloss, log_dict_disc = self.loss(qloss, x, xrec, 1,
+                                            self.global_step,
+                                            last_layer=self.get_last_layer(),
+                                            split="val"+suffix,
+                                            predicted_indices=inds
+                                            )
+
+        nll_loss = log_dict_ae[f"val{suffix}/nll_loss"]
+        self.log(f"val{suffix}/nll_loss", nll_loss,
+                 prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=len(x))
+        self.log(f"val{suffix}/aeloss", aeloss,
+                 prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=len(x))
+        if version.parse(pl.__version__) >= version.parse('1.4.0'):
+            del log_dict_ae[f"val{suffix}/nll_loss"]
+
+        self.log_dict(log_dict_ae, batch_size=len(x))
+        self.log_dict(log_dict_disc, batch_size=len(x))
+        return self.log_dict
 
 
 class VQModelInterface(VQModel):

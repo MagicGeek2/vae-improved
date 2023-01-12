@@ -1,7 +1,7 @@
-data/
-logs/
-tmp/
-checkpoints/
+/data
+/logs
+/tmp
+/checkpoints
 # ckpt
 *.pth
 *.pt

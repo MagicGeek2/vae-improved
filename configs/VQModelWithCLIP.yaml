@@ -1,0 +1,91 @@
+res: 256
+
+model:
+  base_learning_rate: 1.0e-4
+  target: vae.models.autoencoder.VQModelWithCLIP
+  params:
+    monitor: train/nll_loss
+    embed_dim: 4
+    n_embed: 16384
+    ddconfig:
+      double_z: False
+      z_channels: 512
+      resolution: ${res}
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult: [1,2,2,4]  # num_down = len(ch_mult)-1
+      num_res_blocks: 2
+      attn_resolutions: [32]
+      dropout: 0.0
+    lossconfig:
+      target: vae.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
+      params:
+        disc_start: 1e9
+        disc_num_layers: 3
+        disc_weight: 0
+        n_classes: ${model.params.n_embed}
+
+        pixelloss_weight: 1.0
+        perceptual_weight: 1.0
+        clip_weight: 1.0
+    optim_config:
+      lr_g_factor: 1
+      scheduler_config:
+        target: vae.lr_scheduler.LambdaLinearScheduler
+        params:
+          verbosity_interval: 0
+          warm_up_steps: [2000]
+          f_min: [1]
+          f_max: [1]
+          f_start: [0]
+          cycle_lengths: [100_000_000]
+    clip_cfg:
+      in_res: 32
+      f_res: 8
+      in_dim: ${model.params.ddconfig.z_channels}
+      clip_feature_dim: 512
+      heads: 8
+      clip_pre_vq: true
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 8
+    num_workers: 4
+    train:
+      target: vae.data.custom.CustomTrain
+      params:
+        training_images_list_file: data/OpenImages/custom_train_1743042.txt
+        data_root: data/OpenImages
+        size: ${res}
+        with_clip_feat: true
+    validation:
+      target: vae.data.custom.CustomTest
+      params:
+        test_images_list_file: data/OpenImages/custom_val_41620.txt
+        data_root: data/OpenImages
+        size: ${res}
+        with_clip_feat: true
+
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        batch_frequency: 10
+        max_images: 16
+        increase_log_steps: false
+  trainer:
+    # max_epochs: 2
+    max_steps: 20 # debug
+
+    check_val_every_n_epoch: 1
+    # val_check_interval: 1000 # * if check_val_every_n_epoch==None count on global step , else on batch_idx
+    
+    log_every_n_steps: 10
+    precision: 32
+    benchmark: true
+    accumulate_grad_batches: 2
+    gradient_clip_val: 1.0
