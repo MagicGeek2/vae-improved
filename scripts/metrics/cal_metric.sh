@@ -18,10 +18,17 @@
 #     --src_path $src_path \
 #     --image_folder checkpoints/metrics/recons/2/images
 
-# * FID calculation , using two image folders containing samples and ground truth images
-gt=checkpoints/metrics/original/coco2014_val/images
+# # * FID calculation , using two image folders containing samples and ground truth images
+# gt=checkpoints/metrics/original/coco2014_val/images
+# # samples=checkpoints/metrics/recons/1/images
+# samples=checkpoints/metrics/recons/2/images
+# device_num=1
+
+# fidelity --gpu $device_num --fid --input1 $samples --input2 $gt
+
+# * IS calculation
 # samples=checkpoints/metrics/recons/1/images
 samples=checkpoints/metrics/recons/2/images
 device_num=1
 
-fidelity --gpu $device_num --fid --input1 $samples --input2 $gt
+fidelity --gpu $device_num --isc --input1 $samples

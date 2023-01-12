@@ -13,6 +13,20 @@ from queue import Queue
 from inspect import isfunction
 from PIL import Image, ImageDraw, ImageFont
 
+import random
+
+def set_seed(seed: int,):
+    """
+    Helper function for reproducible behavior to set the seed in `random`, `numpy`, `torch`.
+
+    Args:
+            seed (`int`): The seed to set.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 
 def log_txt_as_img(wh, xc, size=10):
     # wh a tuple of (width, height)

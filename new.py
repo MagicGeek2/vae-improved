@@ -1,20 +1,57 @@
 import argparse
 from omegaconf import OmegaConf
 import json
+import torch
+import os
+from PIL import Image
+Image.MAX_IMAGE_PIXELS=None
+from glob import glob
+from collections import Counter
+from tqdm.auto import tqdm
+import imagesize
 
-def get_parser(**parser_kwargs):
-    parser = argparse.ArgumentParser(**parser_kwargs)
-    parser.add_argument(
-        "--src_path",
-        type=str,
-        default="",
-        help='txt file containing original image paths'
-    )
-    return parser
+img_dir = 'data/OpenImages/train'
+print(f'loading img paths...')
+img_paths = glob(f'{img_dir}/*.jpg')
+print(f'sorting...')
+img_paths.sort()
+print(f'done! {len(img_paths)} items in total')
+SIDE_LIMIT=1024
+start_idx, end_idx = 0, 180_0000
+if end_idx>len(img_paths):
+    end_idx=len(img_paths)
+img_paths=img_paths[start_idx:end_idx]
+print(f'handling {img_dir} No.{start_idx} to No.{end_idx-1}')
 
-parser = get_parser()
-args=parser.parse_args()
+cnt_big=0
+for img_path in tqdm(img_paths):
+    try:
+        img_size=imagesize.get(img_path)
+    except:
+        img_size = Image.open(img_path).size
+        
+    if max(img_size) > SIDE_LIMIT:
+        cnt_big+=1
+print(f'num imgs > {SIDE_LIMIT}: {cnt_big}')
+print(f'num imgs <= {SIDE_LIMIT}: {len(img_paths) - cnt_big}')
 
-# print(vars(args))
-# print(OmegaConf.to_yaml(args))
-json.dump(vars(args), open('tmp/index.json', 'w'))
+
+# def smaller_size(size, max_len):
+#     ratio=max_len/max(size)
+#     return int(size[0]*ratio), int(size[1]*ratio)
+
+# cnt=0
+# for img_path in tqdm(img_paths):
+#     # img_size=imagesize.get(img_path)
+#     try:
+#         img_size=imagesize.get(img_path)
+#     except:
+#         img_size = Image.open(img_path).size
+#     if max(img_size) > SIDE_LIMIT:
+#         cnt+=1
+#         img=Image.open(img_path)
+#         tgt_size=smaller_size(img_size, SIDE_LIMIT)
+#         # print(f'{img.size} -> {size}')
+#         img=img.resize(tgt_size, resample=Image.Resampling.BILINEAR)
+#         img.save(img_path)
+# print(f'{cnt} imgs resized')
