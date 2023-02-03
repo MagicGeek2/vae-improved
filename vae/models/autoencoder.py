@@ -199,9 +199,9 @@ class VQModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         log_dict = self._validation_step(batch, batch_idx)
-        with self.ema_scope():
-            log_dict_ema = self._validation_step(
-                batch, batch_idx, suffix="_ema")
+        # with self.ema_scope():
+        #     log_dict_ema = self._validation_step(
+        #         batch, batch_idx, suffix="_ema")
         return log_dict
 
     def _validation_step(self, batch, batch_idx, suffix=""):
@@ -291,7 +291,7 @@ class VQModel(pl.LightningModule):
         log["reconstructions"] = xrec
         if plot_ema:
             with self.ema_scope():
-                xrec_ema, qloss_ema = self.forward(x)
+                xrec_ema, qloss_ema, *_ = self(x)
                 if x.shape[1] > 3:
                     xrec_ema = self.to_rgb(xrec_ema)
                 log["reconstructions_ema"] = xrec_ema
@@ -309,7 +309,7 @@ class VQModel(pl.LightningModule):
 
 class VQModelWithCLIP(VQModel):
 
-    def __init__(self, clip_feat_key="clip_feat", clip_cfg=None, **kwargs):
+    def __init__(self, clip_feat_key="clip_feat", clip_cfg=None, ckpt_path=None, ignore_keys=[], **kwargs):
         super().__init__(**kwargs)
         self.clip_aware = False
         self.clip_feat_key = clip_feat_key
@@ -322,6 +322,9 @@ class VQModelWithCLIP(VQModel):
             self.clip_aware = True
         if self.clip_aware:
             self.vae_params.extend(self.clip_attnpool.parameters())
+            
+        if ckpt_path is not None:
+            self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
 
     def forward(self, input):
         z = self.encoder(input)
